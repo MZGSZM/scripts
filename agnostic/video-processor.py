@@ -106,8 +106,6 @@ def get_video_bitrate_kbps(probe_data):
     Best-effort video bitrate in kbps.
     Priority: video stream bit_rate -> format-level bit_rate minus audio estimate.
     Returns None if a reliable figure cannot be determined.
-    Used to estimate the 'natural' output size before deciding whether a
-    size cap is actually needed.
     """
     video = get_stream(probe_data, "video")
     if video:
@@ -115,7 +113,6 @@ def get_video_bitrate_kbps(probe_data):
         if br:
             return max(int(br) // 1000, 1)
 
-    # Fall back to total format bitrate minus audio as a rough proxy.
     fmt_br = probe_data.get("format", {}).get("bit_rate")
     if fmt_br:
         total_kbps = int(fmt_br) // 1000
@@ -125,6 +122,16 @@ def get_video_bitrate_kbps(probe_data):
             return estimate
 
     return None
+
+
+def estimate_natural_size_mb(source_video_kbps, audio_kbps, duration_sec,
+                              container_overhead=0.02):
+    """
+    Estimate the output file size (MB) if encoded at source_video_kbps.
+    Used to decide whether a size cap is necessary at all.
+    """
+    total_bits = (source_video_kbps + audio_kbps) * 1000 * duration_sec
+    return total_bits * (1 + container_overhead) / 8 / 1_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -417,30 +424,19 @@ def ask_codec():
     return codec, ext
 
 
-def estimate_natural_size_mb(source_video_kbps, audio_kbps, duration_sec,
-                              container_overhead=0.02):
-    """
-    Estimate the output file size (MB) if the video is encoded at
-    source_video_kbps with no artificial bitrate cap.
-
-    This is an approximation: re-encoding is lossy and codec efficiency
-    varies, but the source bitrate is the best available proxy for
-    'same-quality' output size.
-    """
-    total_bits = (source_video_kbps + audio_kbps) * 1000 * duration_sec
-    return total_bits * (1 + container_overhead) / 8 / 1_000_000
-
-
 def ask_quality_mode(source_mb, duration_sec, extension,
                      source_audio_kbps, source_video_kbps):
     """
     Ask the user how they want to control output size / quality.
 
     Three options:
-      1. Size limit (MB)   -- caps bitrate only if the natural output would
-                              exceed the limit; otherwise encodes unconstrained
-      2. Constant quality  -- let the encoder decide the bitrate via -q:v
-      3. Default 4 Mbps    -- fixed 4 Mbps fallback
+      1. Size limit (MB)     -- caps bitrate only as much as needed to stay
+                                under the limit; never inflates beyond source quality
+      2. Constant quality    -- let the encoder decide the bitrate via -q:v
+      3. Default 4 Mbps      -- fixed 4 Mbps fallback
+
+    A bitrate cap is ALWAYS applied in mode 1 to prevent the unconstrained
+    4 Mbps default from blowing past the limit when the source is low-bitrate.
 
     Returns (bitrate_kbps_or_None, quality_int_or_None, limit_mb_or_None).
     """
@@ -467,7 +463,9 @@ def ask_quality_mode(source_mb, duration_sec, extension,
 
         effective_audio_kbps = 128 if extension == ".webm" else source_audio_kbps
 
-        # Estimate what the output would naturally be at source quality.
+        # The hard ceiling: bitrate required to fit inside limit_mb exactly.
+        limit_bitrate = calculate_video_bitrate(limit_mb, duration_sec, effective_audio_kbps)
+
         if source_video_kbps:
             natural_mb = estimate_natural_size_mb(
                 source_video_kbps, effective_audio_kbps, duration_sec
@@ -475,28 +473,33 @@ def ask_quality_mode(source_mb, duration_sec, extension,
             print(f"  Estimated natural output size: ~{natural_mb:.1f} MB")
 
             if natural_mb <= limit_mb:
-                # Fits within the limit — no artificial cap needed.
+                # Natural output fits — cap at source bitrate to avoid inflating
+                # the file. Never go unconstrained: the 4 Mbps default can easily
+                # exceed the limit when the source bitrate is well below 4 Mbps.
+                bitrate = min(source_video_kbps, limit_bitrate)
                 print(
                     f"  Natural output fits within {limit_mb:.1f} MB limit. "
-                    f"Encoding without size constraint to preserve quality."
+                    f"Capping at source bitrate (~{bitrate} kbps) to avoid inflation."
                 )
-                return None, None, limit_mb
+            else:
+                # Natural output would exceed the limit — apply the tighter cap.
+                bitrate = limit_bitrate
+                print(
+                    f"  Natural output exceeds limit — capping video bitrate to ~{bitrate} kbps "
+                    f"(audio: ~{effective_audio_kbps} kbps, 2% container overhead reserved)"
+                )
         else:
-            # Can't estimate natural size — fall through to capped mode.
-            print("  Could not estimate natural size; applying bitrate cap.")
-
-        # Natural size exceeds (or is unknown vs.) the limit — apply a cap.
-        bitrate = calculate_video_bitrate(limit_mb, duration_sec, effective_audio_kbps)
+            # Can't estimate natural size — apply the limit cap as a safe default.
+            bitrate = limit_bitrate
+            print(
+                f"  Could not estimate natural size; capping to ~{bitrate} kbps "
+                f"to stay within {limit_mb:.1f} MB."
+            )
 
         if bitrate < 200:
             print(
                 f"  Warning: calculated bitrate is only {bitrate} kbps — "
                 f"output quality may be very poor for this size limit."
-            )
-        else:
-            print(
-                f"  Natural output exceeds limit — capping video bitrate to ~{bitrate} kbps  "
-                f"(audio: ~{effective_audio_kbps} kbps, 2% container overhead reserved)"
             )
         return bitrate, None, limit_mb
 
