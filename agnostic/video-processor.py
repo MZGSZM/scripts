@@ -101,6 +101,32 @@ def get_audio_bitrate_kbps(probe_data):
     return 128
 
 
+def get_video_bitrate_kbps(probe_data):
+    """
+    Best-effort video bitrate in kbps.
+    Priority: video stream bit_rate -> format-level bit_rate minus audio estimate.
+    Returns None if a reliable figure cannot be determined.
+    Used to estimate the 'natural' output size before deciding whether a
+    size cap is actually needed.
+    """
+    video = get_stream(probe_data, "video")
+    if video:
+        br = video.get("bit_rate")
+        if br:
+            return max(int(br) // 1000, 1)
+
+    # Fall back to total format bitrate minus audio as a rough proxy.
+    fmt_br = probe_data.get("format", {}).get("bit_rate")
+    if fmt_br:
+        total_kbps = int(fmt_br) // 1000
+        audio_kbps = get_audio_bitrate_kbps(probe_data)
+        estimate   = total_kbps - audio_kbps
+        if estimate > 0:
+            return estimate
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Bitrate calculation
 # ---------------------------------------------------------------------------
@@ -391,19 +417,35 @@ def ask_codec():
     return codec, ext
 
 
-def ask_quality_mode(source_mb, duration_sec, extension, source_audio_kbps):
+def estimate_natural_size_mb(source_video_kbps, audio_kbps, duration_sec,
+                              container_overhead=0.02):
+    """
+    Estimate the output file size (MB) if the video is encoded at
+    source_video_kbps with no artificial bitrate cap.
+
+    This is an approximation: re-encoding is lossy and codec efficiency
+    varies, but the source bitrate is the best available proxy for
+    'same-quality' output size.
+    """
+    total_bits = (source_video_kbps + audio_kbps) * 1000 * duration_sec
+    return total_bits * (1 + container_overhead) / 8 / 1_000_000
+
+
+def ask_quality_mode(source_mb, duration_sec, extension,
+                     source_audio_kbps, source_video_kbps):
     """
     Ask the user how they want to control output size / quality.
 
     Three options:
-      1. Target file size in MB  -- calculates the required video bitrate
-      2. Constant quality (-q:v) -- let the encoder decide the bitrate
-      3. Default 4 Mbps          -- skip both, use the fixed fallback
+      1. Size limit (MB)   -- caps bitrate only if the natural output would
+                              exceed the limit; otherwise encodes unconstrained
+      2. Constant quality  -- let the encoder decide the bitrate via -q:v
+      3. Default 4 Mbps    -- fixed 4 Mbps fallback
 
-    Returns (bitrate_kbps_or_None, quality_int_or_None, target_mb_or_None).
+    Returns (bitrate_kbps_or_None, quality_int_or_None, limit_mb_or_None).
     """
     print("\n--- Bitrate / Quality Mode ---")
-    print("  1. Target file size (MB)  — calculates bitrate to meet a size goal")
+    print("  1. Size limit (MB)        — caps bitrate only if needed to stay under limit")
     print("  2. Quality value (-q:v)   — constant quality, unpredictable file size")
     print("  3. Default (4 Mbps)       — fixed 4 Mbps, skip both options above")
 
@@ -411,32 +453,52 @@ def ask_quality_mode(source_mb, duration_sec, extension, source_audio_kbps):
 
     if mode == "1":
         if not (duration_sec and source_mb):
-            print("  Target-size unavailable: probe data missing.")
+            print("  Size-limit unavailable: probe data missing.")
             return None, None, None
 
-        raw = input(f"  Target size in MB (source is {source_mb:.1f} MB): ").strip()
+        raw = input(f"  Size limit in MB (source is {source_mb:.1f} MB): ").strip()
         if not raw:
             return None, None, None
         try:
-            target_mb = float(raw)
+            limit_mb = float(raw)
         except ValueError:
             print("  Invalid number — using default.")
             return None, None, None
 
         effective_audio_kbps = 128 if extension == ".webm" else source_audio_kbps
-        bitrate = calculate_video_bitrate(target_mb, duration_sec, effective_audio_kbps)
+
+        # Estimate what the output would naturally be at source quality.
+        if source_video_kbps:
+            natural_mb = estimate_natural_size_mb(
+                source_video_kbps, effective_audio_kbps, duration_sec
+            )
+            print(f"  Estimated natural output size: ~{natural_mb:.1f} MB")
+
+            if natural_mb <= limit_mb:
+                # Fits within the limit — no artificial cap needed.
+                print(
+                    f"  Natural output fits within {limit_mb:.1f} MB limit. "
+                    f"Encoding without size constraint to preserve quality."
+                )
+                return None, None, limit_mb
+        else:
+            # Can't estimate natural size — fall through to capped mode.
+            print("  Could not estimate natural size; applying bitrate cap.")
+
+        # Natural size exceeds (or is unknown vs.) the limit — apply a cap.
+        bitrate = calculate_video_bitrate(limit_mb, duration_sec, effective_audio_kbps)
 
         if bitrate < 200:
             print(
                 f"  Warning: calculated bitrate is only {bitrate} kbps — "
-                f"output quality may be very poor for this target size."
+                f"output quality may be very poor for this size limit."
             )
         else:
             print(
-                f"  Video bitrate: ~{bitrate} kbps  "
+                f"  Natural output exceeds limit — capping video bitrate to ~{bitrate} kbps  "
                 f"(audio: ~{effective_audio_kbps} kbps, 2% container overhead reserved)"
             )
-        return bitrate, None, target_mb
+        return bitrate, None, limit_mb
 
     elif mode == "2":
         print("  Scale: 0 (best quality) to 51 (worst). Typical range: 18-28.")
@@ -493,6 +555,7 @@ def main():
         duration   = float(probe["format"]["duration"])
         source_mb  = os.path.getsize(input_path) / 1_000_000
         audio_kbps = get_audio_bitrate_kbps(probe)
+        video_kbps = get_video_bitrate_kbps(probe)
 
         video_stream = get_stream(probe, "video")
         res_str = ""
@@ -523,16 +586,17 @@ def main():
             )
 
     except Exception as e:
-        print(f"  Warning: probe failed ({e}). Target-size feature disabled.")
+        print(f"  Warning: probe failed ({e}). Size-limit feature disabled.")
         duration   = None
         source_mb  = None
         audio_kbps = 128
+        video_kbps = None
 
     # --- Menus ---
     selected_scale         = ask_resolution()
     selected_codec, ext    = ask_codec()
     bitrate, quality, target_mb = ask_quality_mode(
-        source_mb, duration, ext, audio_kbps
+        source_mb, duration, ext, audio_kbps, video_kbps
     )
 
     # --- Output path ---
@@ -593,7 +657,8 @@ def main():
         if target_mb:
             deviation = (actual_mb - target_mb) / target_mb * 100
             sign = "+" if deviation >= 0 else ""
-            print(f"  (target: {target_mb:.1f} MB, deviation: {sign}{deviation:.1f}%)", end="")
+            over_under = "over limit" if deviation > 0 else "under limit"
+            print(f"  (limit: {target_mb:.1f} MB, {sign}{deviation:.1f}% {over_under})", end="")
         print()
 
 
