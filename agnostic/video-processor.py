@@ -268,7 +268,19 @@ def run_with_progress(cmd, duration_sec):
     Run ffmpeg, printing a live progress percentage.
     Captures stderr; dumps it only on failure.
     Returns the process return code.
+
+    Design notes:
+    - stderr is drained on a background thread so its pipe buffer (64 KB)
+      never fills up and causes ffmpeg to block, regardless of -nostats.
+    - The terminal write (print + flush) is RATE-LIMITED to at most once per
+      0.5 s. Without this, at high encode rates (200+ fps) ffmpeg writes one
+      progress block per frame: the flush to the Termux terminal becomes the
+      bottleneck, the stdout pipe fills up, and ffmpeg stalls mid-encode.
+      Separating "drain the pipe as fast as possible" from "update the display
+      occasionally" keeps both sides unblocked.
     """
+    import threading
+
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -276,8 +288,21 @@ def run_with_progress(cmd, duration_sec):
         text=True,
     )
 
-    # Read stdout (progress key=value pairs) line by line.
-    # stderr is drained after stdout closes to avoid deadlocking on a full pipe.
+    stderr_chunks = []
+
+    def drain_stderr():
+        """Continuously read stderr so its pipe buffer never fills up."""
+        for line in proc.stderr:
+            stderr_chunks.append(line)
+
+    stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+    stderr_thread.start()
+
+    # Read stdout (progress key=value pairs) as fast as possible.
+    # Only update the terminal display at most every 0.5 s so the flush
+    # never becomes the rate-limiting step.
+    last_print = 0.0
+    last_pct   = 0.0
     while True:
         line = proc.stdout.readline()
         if not line:
@@ -287,17 +312,22 @@ def run_with_progress(cmd, duration_sec):
             try:
                 ms = int(line.split("=", 1)[1])
                 elapsed = ms / 1_000_000          # microseconds -> seconds
-                pct = min(elapsed / duration_sec * 100, 100.0)
-                print(f"\r  Progress: {pct:5.1f}%", end="", flush=True)
+                last_pct = min(elapsed / duration_sec * 100, 100.0)
+                now = time.monotonic()
+                if now - last_print >= 0.5:
+                    print(f"\r  Progress: {last_pct:5.1f}%", end="", flush=True)
+                    last_print = now
             except (ValueError, ZeroDivisionError):
                 pass
 
-    _, stderr_output = proc.communicate()
-    print()   # newline after the progress line
+    proc.wait()
+    stderr_thread.join()
+    # Print the final percentage so the display always ends at 100 %.
+    print(f"\r  Progress: {last_pct:5.1f}%")
 
     if proc.returncode != 0:
         print("\n--- ffmpeg stderr ---")
-        print(stderr_output.strip())
+        print("".join(stderr_chunks).strip())
 
     return proc.returncode
 
