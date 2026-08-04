@@ -326,18 +326,24 @@ def main():
                          help="File or directory to search (default: current directory)")
     parser.add_argument("-r", "--recursive", action="store_true",
                          help="Recurse into subdirectories")
-    parser.add_argument("--include-ext", nargs="*", default=None,
-                         help="Whitelist: only search files with these extensions "
-                              "(e.g. --include-ext torrent txt)")
-    parser.add_argument("--exclude-ext", nargs="*", default=None,
-                         help="Blacklist: skip files with these extensions "
-                              "(e.g. --exclude-ext jpg png)")
-    parser.add_argument("--include-path", nargs="*", default=None,
-                         help="Whitelist: only search paths matching these glob "
-                              "patterns (e.g. --include-path '*/downloads/*')")
-    parser.add_argument("--exclude-path", nargs="*", default=None,
-                         help="Blacklist: skip paths matching these glob patterns "
-                              "(e.g. --exclude-path '*/node_modules/*' '*/.git/*')")
+    parser.add_argument("--include-ext", action="append", default=None,
+                         help="Whitelist: only search files with this extension. "
+                              "Repeatable or comma-separated "
+                              "(e.g. --include-ext torrent --include-ext txt, "
+                              "or --include-ext torrent,txt)")
+    parser.add_argument("--exclude-ext", action="append", default=None,
+                         help="Blacklist: skip files with this extension. "
+                              "Repeatable or comma-separated "
+                              "(e.g. --exclude-ext jpg --exclude-ext png)")
+    parser.add_argument("--include-path", action="append", default=None,
+                         help="Whitelist: only search paths matching this glob "
+                              "pattern. Repeatable "
+                              "(e.g. --include-path '*/downloads/*')")
+    parser.add_argument("--exclude-path", action="append", default=None,
+                         help="Blacklist: skip paths matching this glob pattern. "
+                              "Repeatable "
+                              "(e.g. --exclude-path '*/node_modules/*' "
+                              "--exclude-path '*/.git/*')")
     parser.add_argument("--case-sensitive", action="store_true",
                          help="Case-sensitive search (default: case-insensitive)")
     parser.add_argument("--regex", action="store_true",
