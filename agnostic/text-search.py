@@ -387,29 +387,38 @@ def main():
     total_files = 0
     total_matches = 0
     files_with_matches = 0
+    interrupted = False
 
-    for path in iter_candidate_files(
-        search_path, args.recursive, include_ext, exclude_ext,
-        include_path, exclude_path,
-    ):
-        total_files += 1
-        matches, error, mode = search_file(path, pattern)
+    try:
+        for path in iter_candidate_files(
+            search_path, args.recursive, include_ext, exclude_ext,
+            include_path, exclude_path,
+        ):
+            total_files += 1
+            matches, error, mode = search_file(path, pattern)
 
-        if error:
-            print(f"[!] {path}: {error}", file=sys.stderr)
-            continue
+            if error:
+                print(f"[!] {path}: {error}", file=sys.stderr)
+                continue
 
-        if matches:
-            files_with_matches += 1
-            total_matches += len(matches)
-            print(f"\n{path}  ({mode}, {len(matches)} match{'es' if len(matches) != 1 else ''})")
-            if not args.quiet:
-                for location, text in matches:
-                    snippet = text if len(text) <= 200 else text[:200] + "..."
-                    print(f"    [{location}] {snippet}")
+            if matches:
+                files_with_matches += 1
+                total_matches += len(matches)
+                print(f"\n{path}  ({mode}, {len(matches)} match{'es' if len(matches) != 1 else ''})")
+                if not args.quiet:
+                    for location, text in matches:
+                        snippet = text if len(text) <= 200 else text[:200] + "..."
+                        print(f"    [{location}] {snippet}")
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n\n[!] Interrupted by user.", file=sys.stderr)
 
-    print(f"\n--- Searched {total_files} file(s), "
+    status = "Interrupted after" if interrupted else "Searched"
+    print(f"\n--- {status} {total_files} file(s), "
           f"found {total_matches} match(es) in {files_with_matches} file(s) ---")
+
+    if interrupted:
+        sys.exit(130)  # conventional exit code for SIGINT
 
 
 if __name__ == "__main__":
