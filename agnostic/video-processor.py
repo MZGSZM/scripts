@@ -199,6 +199,178 @@ def estimate_natural_size_mb(source_video_kbps, audio_kbps, duration_sec,
     return total_bits * (1 + container_overhead) / 8 / 1_000_000
 
 
+def audio_only_size_mb(audio_kbps, duration_sec, container_overhead=0.02):
+    """Size (MB) of the audio tracks alone: the floor for any size limit."""
+    return audio_kbps * 1000 * duration_sec * (1 + container_overhead) / 8 / 1_000_000
+
+
+# ---------------------------------------------------------------------------
+# Source description
+# ---------------------------------------------------------------------------
+
+def format_fps(stream):
+    """Frame rate as a short string, from r_frame_rate ('30000/1001')."""
+    raw = stream.get("r_frame_rate", "") or ""
+    try:
+        num, den = raw.split("/")
+        value = int(num) / int(den)
+    except (ValueError, ZeroDivisionError):
+        return raw
+    return f"{value:.3f}".rstrip("0").rstrip(".") + " fps"
+
+
+def format_kbps(kbps):
+    if not kbps:
+        return "bitrate unknown"
+    if kbps >= 10000:
+        return f"{kbps / 1000:.1f} Mbps"
+    return f"{kbps} kbps"
+
+
+def format_duration(seconds):
+    if not seconds:
+        return "unknown"
+    return f"{format_elapsed(int(seconds))} ({seconds:.1f}s)"
+
+
+def describe_video_stream(stream, estimated_kbps=None):
+    """One line describing a video stream: codec, profile, size, depth, rate.
+
+    estimated_kbps is used when the stream itself carries no bitrate, which
+    is normal for MKV: it is derived from the container total minus audio.
+    """
+    parts = [stream.get("codec_name", "unknown")]
+    profile = stream.get("profile")
+    if profile:
+        parts[0] += f" ({profile}"
+        level = stream.get("level")
+        if level and level > 0:
+            parts[0] += f" L{level / 10:g}"
+        parts[0] += ")"
+
+    w, h = display_dimensions(stream)
+    if w and h:
+        stored_w, stored_h = stream.get("width"), stream.get("height")
+        size = f"{w}x{h}"
+        if (stored_w, stored_h) != (w, h):
+            size += f" (stored {stored_w}x{stored_h}, rotated)"
+        parts.append(size)
+
+    fps = format_fps(stream)
+    if fps:
+        parts.append(fps)
+
+    pix_fmt = stream.get("pix_fmt")
+    if pix_fmt:
+        depth = stream.get("bits_per_raw_sample")
+        parts.append(f"{pix_fmt} {depth}-bit" if depth else pix_fmt)
+
+    kbps = stream_bitrate_kbps(stream)
+    if kbps:
+        parts.append(format_kbps(kbps))
+    elif estimated_kbps:
+        parts.append(f"~{format_kbps(estimated_kbps)} (estimated)")
+    else:
+        parts.append("bitrate unknown")
+
+    transfer = stream.get("color_transfer")
+    if transfer and transfer not in ("bt709", "smpte170m", "bt470bg"):
+        parts.append(f"transfer: {transfer}")
+
+    return ", ".join(parts)
+
+
+def describe_audio_stream(stream):
+    parts = [stream.get("codec_name", "unknown")]
+    profile = stream.get("profile")
+    if profile and profile != "unknown":
+        parts[0] += f" ({profile})"
+
+    layout = stream.get("channel_layout")
+    channels = stream.get("channels")
+    if layout:
+        parts.append(layout)
+    elif channels:
+        parts.append(f"{channels} ch")
+
+    rate = stream.get("sample_rate")
+    if rate:
+        try:
+            parts.append(f"{int(rate) / 1000:g} kHz")
+        except ValueError:
+            pass
+
+    kbps = stream_bitrate_kbps(stream)
+    # The fallback here must match the one plan_streams uses for size math.
+    parts.append(format_kbps(kbps) if kbps else "bitrate unknown (128 kbps assumed)")
+    return ", ".join(parts)
+
+
+def describe_subtitle_stream(stream):
+    parts = [stream.get("codec_name", "unknown")]
+    if stream.get("codec_name") in _TEXT_SUB_CODECS:
+        parts.append("text")
+    else:
+        parts.append("bitmap")
+    return ", ".join(parts)
+
+
+def _stream_labels(stream):
+    """Language and title tags, formatted for the end of a description line."""
+    tags = stream.get("tags", {}) or {}
+    bits = []
+    lang = tags.get("language") or tags.get("LANGUAGE")
+    if lang and lang != "und":
+        bits.append(lang)
+    title = tags.get("title") or tags.get("TITLE")
+    if title:
+        bits.append(f'"{title}"')
+    disposition = stream.get("disposition", {}) or {}
+    for flag in ("default", "forced", "hearing_impaired"):
+        if disposition.get(flag):
+            bits.append(flag)
+    return f" [{', '.join(bits)}]" if bits else ""
+
+
+def describe_source(probe_data, source_mb, duration_sec):
+    """Print a per-stream breakdown of the input file."""
+    container = (probe_data.get("format", {}).get("format_long_name")
+                 or probe_data.get("format", {}).get("format_name", "unknown"))
+    total_kbps = None
+    try:
+        total_kbps = int(probe_data["format"]["bit_rate"]) // 1000
+    except (KeyError, TypeError, ValueError):
+        pass
+
+    print(f"  Container: {container}")
+    print(f"  Duration: {format_duration(duration_sec)} | Size: {source_mb:.1f} MB "
+          f"| Overall: {format_kbps(total_kbps)}")
+
+    video_kbps = get_video_bitrate_kbps(probe_data)
+    for stream in get_streams(probe_data, "video"):
+        print(f"  Video  #{stream['index']}: "
+              f"{describe_video_stream(stream, video_kbps)}"
+              f"{_stream_labels(stream)}")
+    for stream in get_streams(probe_data, "audio"):
+        print(f"  Audio  #{stream['index']}: {describe_audio_stream(stream)}"
+              f"{_stream_labels(stream)}")
+    for stream in get_streams(probe_data, "subtitle"):
+        print(f"  Subs   #{stream['index']}: {describe_subtitle_stream(stream)}"
+              f"{_stream_labels(stream)}")
+
+    attachments = get_streams(probe_data, "attachment")
+    if attachments:
+        print(f"  Attachments: {len(attachments)} (fonts etc.)")
+
+    video = get_stream(probe_data, "video")
+    if video:
+        depth = video.get("bits_per_raw_sample")
+        pix_fmt = video.get("pix_fmt", "")
+        if (depth and str(depth) != "8") or "10" in pix_fmt or "12" in pix_fmt:
+            print("  Note: source is more than 8-bit; output is converted to "
+                  "8-bit yuv420p (MediaCodec requirement).")
+
+
 # ---------------------------------------------------------------------------
 # Bitrate calculation
 # ---------------------------------------------------------------------------
@@ -563,6 +735,36 @@ def resolve_output_path(proposed_path):
 # Interactive menus
 # ---------------------------------------------------------------------------
 
+def parse_size_input(raw, source_mb):
+    """Parse a size limit into MB (10^6 bytes), or None if unparseable.
+
+    Accepts a bare number ('500'), a unit suffix ('500MB', '1.2GB', '700MiB'),
+    or a percentage of the source size ('50%').
+    """
+    text = raw.strip().lower().replace(" ", "")
+    if not text:
+        return None
+
+    multiplier = 1.0
+    if text.endswith("%"):
+        text = text[:-1]
+        multiplier = source_mb / 100 if source_mb else 0
+    else:
+        for suffix, factor in (("gib", 1073.741824), ("mib", 1.048576),
+                               ("gb", 1000.0), ("mb", 1.0),
+                               ("g", 1000.0), ("m", 1.0)):
+            if text.endswith(suffix):
+                text = text[:-len(suffix)]
+                multiplier = factor
+                break
+
+    try:
+        value = float(text) * multiplier
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def ask_resolution():
     print("\n--- Select Resolution ---")
     options = {
@@ -615,7 +817,25 @@ def ask_quality_mode(source_mb, duration_sec, audio_kbps, source_video_kbps):
 
     Returns (bitrate_kbps_or_None, quality_int_or_None, limit_mb_or_None).
     """
+    natural_mb = None
+    if duration_sec and source_video_kbps:
+        natural_mb = estimate_natural_size_mb(source_video_kbps, audio_kbps, duration_sec)
+
     print("\n--- Bitrate / Quality Mode ---")
+    if source_mb:
+        print(f"  Source size: {source_mb:.1f} MB")
+    if natural_mb is not None:
+        print(f"  Estimated natural output size: ~{natural_mb:.1f} MB "
+              f"(re-encoding at the source video bitrate, {source_video_kbps} kbps)")
+        print("  Downscaling the resolution usually lands below that estimate.")
+    elif duration_sec:
+        print("  Estimated natural output size: unknown (source video bitrate "
+              "could not be determined)")
+    if duration_sec:
+        floor_mb = audio_only_size_mb(audio_kbps, duration_sec)
+        fmt = ".2f" if floor_mb < 1 else ".1f"
+        print(f"  Audio alone: ~{floor_mb:{fmt}} MB ({audio_kbps} kbps total), "
+              f"so a size limit below ~{floor_mb * 1.1:{fmt}} MB is not achievable.")
     print("  1. Size limit (MB)        - caps bitrate only if needed to stay under limit")
     print("  2. Constant quality (CQ)  - device-dependent, unpredictable file size")
     print("  3. Default (4 Mbps)       - fixed 4 Mbps, skip both options above")
@@ -627,16 +847,15 @@ def ask_quality_mode(source_mb, duration_sec, audio_kbps, source_video_kbps):
             print("  Size-limit unavailable: probe data missing. Using default 4 Mbps.")
             return None, None, None
 
-        raw = input(f"  Size limit in MB (source is {source_mb:.1f} MB): ").strip()
+        print("  Accepts e.g. '500', '500MB', '1.2GB', or '50%' of the source size.")
+        raw = input("  Size limit (Enter to skip): ").strip()
         if not raw:
             return None, None, None
-        try:
-            limit_mb = float(raw)
-            if limit_mb <= 0:
-                raise ValueError
-        except ValueError:
-            print("  Invalid number. Using default 4 Mbps.")
+        limit_mb = parse_size_input(raw, source_mb)
+        if limit_mb is None:
+            print("  Invalid size. Using default 4 Mbps.")
             return None, None, None
+        print(f"  Limit: {limit_mb:.1f} MB")
 
         limit_bitrate = calculate_video_bitrate(limit_mb, duration_sec, audio_kbps)
 
@@ -649,10 +868,7 @@ def ask_quality_mode(source_mb, duration_sec, audio_kbps, source_video_kbps):
             )
             return MIN_VIDEO_KBPS, None, limit_mb
 
-        if source_video_kbps:
-            natural_mb = estimate_natural_size_mb(source_video_kbps, audio_kbps, duration_sec)
-            print(f"  Estimated natural output size: ~{natural_mb:.1f} MB")
-
+        if natural_mb is not None:
             if natural_mb <= limit_mb:
                 # Natural output fits: cap at source bitrate to avoid inflating
                 # the file. Never go unconstrained; the 4 Mbps default can
@@ -700,6 +916,67 @@ def ask_quality_mode(source_mb, duration_sec, audio_kbps, source_video_kbps):
     else:
         print("  Using default 4 Mbps bitrate.")
         return None, None, None
+
+
+# ---------------------------------------------------------------------------
+# Pre-run summary
+# ---------------------------------------------------------------------------
+
+# What each encoder actually produces, for the "re-encoding to the same codec"
+# check below.
+_ENCODER_CODEC = {
+    "h264_mediacodec": "h264",
+    "hevc_mediacodec": "hevc",
+    "av1_mediacodec": "av1",
+    "vp9_mediacodec": "vp9",
+    "vp8_mediacodec": "vp8",
+}
+
+
+def print_plan_summary(input_path, output_path, probe, scale, v_codec, portrait,
+                       bitrate, quality, target_mb, audio_kbps, duration_sec,
+                       source_mb):
+    """Print what is about to happen, including a predicted output size."""
+    print("\n--- Plan ---")
+    print(f"  Input:  {input_path}")
+    print(f"  Output: {output_path}")
+
+    video = get_stream(probe, "video") if probe else None
+    src_dims = display_dimensions(video) if video else (None, None)
+    if scale:
+        w, h = scale.split(":")
+        if portrait:
+            w, h = h, w
+        target = f"fit inside {w}x{h}"
+        if src_dims[0] and src_dims[1] and int(w) >= src_dims[0] and int(h) >= src_dims[1]:
+            target += f" (source is already {src_dims[0]}x{src_dims[1]}, no scaling)"
+        print(f"  Resolution: {target}")
+    elif src_dims[0]:
+        print(f"  Resolution: unchanged ({src_dims[0]}x{src_dims[1]})")
+
+    print(f"  Encoder: {v_codec}")
+    if video and _ENCODER_CODEC.get(v_codec) == video.get("codec_name"):
+        print(f"  Note: the source is already {video.get('codec_name')}; "
+              f"re-encoding it costs quality with no format change.")
+
+    if bitrate:
+        print(f"  Video rate: {format_kbps(bitrate)} target"
+              + (f" (size limit {target_mb:.1f} MB)" if target_mb else ""))
+    elif quality is not None:
+        print(f"  Video rate: constant quality {quality} (CQ), size not predictable")
+    else:
+        print("  Video rate: 4 Mbps default")
+
+    print(f"  Audio: ~{audio_kbps} kbps total across all output tracks")
+
+    if bitrate and duration_sec:
+        predicted = estimate_natural_size_mb(bitrate, audio_kbps, duration_sec)
+        line = f"  Predicted output size: ~{predicted:.1f} MB"
+        if source_mb:
+            line += f" ({predicted / source_mb * 100:.0f}% of source)"
+        print(line)
+        print("  Hardware encoders treat the bitrate as a target, so the real "
+              "size can land above or below this.")
 
 
 # ---------------------------------------------------------------------------
@@ -758,26 +1035,12 @@ def main():
         video_kbps = get_video_bitrate_kbps(probe)
 
         video_stream = get_stream(probe, "video")
-        res_str = ""
         if video_stream:
             w, h = display_dimensions(video_stream)
             if isinstance(w, int) and isinstance(h, int):
                 portrait = h > w
-            fps_raw = video_stream.get("r_frame_rate", "")
-            try:
-                num, den = fps_raw.split("/")
-                fps = f"{int(num) / int(den):.2f} fps"
-            except (ValueError, ZeroDivisionError):
-                fps = fps_raw
-            res_str = f" | {w}x{h} @ {fps}"
 
-        dur_str = f"{duration:.1f}s" if duration else "unknown"
-        n_audio = len(get_streams(probe, "audio"))
-        n_subs = len(get_streams(probe, "subtitle"))
-        print(
-            f"  Duration: {dur_str}{res_str} | Size: {source_mb:.1f} MB | "
-            f"Audio tracks: {n_audio} | Subtitle tracks: {n_subs}"
-        )
+        describe_source(probe, source_mb, duration)
 
         # HDR check: warn but do not abort. The user may have a tone-mapped
         # workflow or may simply accept the colour shift.
@@ -825,6 +1088,11 @@ def main():
         portrait=portrait,
     )
 
+    print_plan_summary(
+        input_path, output_path, probe, selected_scale, selected_codec,
+        portrait, bitrate, quality, target_mb, audio_kbps, duration, source_mb,
+    )
+
     print(f"\nRunning: {shlex.join(cmd)}\n")
 
     if args.dry_run:
@@ -855,6 +1123,9 @@ def main():
         print(f"\nDone!  Elapsed: {format_elapsed(elapsed)}")
         print(f"  Output: {output_path}")
         print(f"  Output size: {actual_mb:.2f} MB", end="")
+        if source_mb:
+            print(f"  ({actual_mb / source_mb * 100:.0f}% of the "
+                  f"{source_mb:.1f} MB source)", end="")
         if target_mb:
             deviation = (actual_mb - target_mb) / target_mb * 100
             sign = "+" if deviation >= 0 else ""
