@@ -34,6 +34,31 @@ Searches the human-readable text inside files for a keyword or regex pattern, in
 
 ---
 
+### `cookies2cobalt.py`
+
+Converts a Netscape-format `cookies.txt` export into the `cookies.json` file a self-hosted [cobalt](https://github.com/imputnet/cobalt) API reads, so you don't have to hand-build cookie strings. Built against cobalt API 11.7.1; pulls `instagram`/`twitter`/`youtube` cookies straight from the export, and lets you add the token-only services (`reddit`, `instagram_bearer`, `vimeo_bearer`) by hand, since those are OAuth credentials rather than cookies and your browser never stores them.
+
+- **Requirements:** Python 3.8+, standard library only
+- **Platform notes:** Pure Python aside from one `os.getuid()` call, which is guarded with `hasattr` so it degrades gracefully on Windows (just skips the "fix ownership" reminder rather than crashing). The output file is written `0600`, but that permission bit — which is what keeps the credentials inside it from being world-readable — only actually restricts access on POSIX systems.
+- **Usage:**
+  ```bash
+  ./cookies2cobalt.py firefox-cookies.txt -o cookies.json
+  ./cookies2cobalt.py firefox-cookies.txt -o -                       # preview on stdout
+  ./cookies2cobalt.py main.txt alt1.txt alt2.txt -o cookies.json     # multiple accounts
+  ./cookies2cobalt.py firefox-cookies.txt --add 'reddit:client_id=xxx; client_secret=yyy; refresh_token=zzz'
+  ```
+- **Key options:** `-o/--output` (`-` for stdout), `-m/--merge` (merge into an existing file; `--replace` to overwrite a service's entries instead of appending), `-s/--services` (limit which services get pulled from the cookie file), `--all-cookies` (every instagram/twitter cookie, not just cobalt's documented set), `--include-expired`, `--add SERVICE:STRING` (repeatable, for the token-only services), `--list-services`
+- **Notable behavior:**
+  - Correctly reads `#HttpOnly_`-prefixed lines; parsers that treat those as comments silently drop `sessionid`/`auth_token`, the two cookies that actually keep you logged in
+  - Cookie values containing `; ` are skipped with a warning, since cobalt splits the string on exactly that substring
+  - `youtube` takes every cookie for the domain (youtubei.js builds a hash from the full cookie header); `instagram`/`twitter` pull only the documented keys unless `--all-cookies` is passed
+  - Supports multiple accounts per service — pass several input files and cobalt picks one at random per request
+  - Must not be mounted read-only in Docker: cobalt rewrites refreshed cookie values back into this file roughly every 60 seconds, so read-only means those writes fail and sessions quietly go stale
+  - Warns if the process isn't running as uid 1000, since cobalt's Docker image runs as that user and needs matching file ownership to read it
+  - cobalt's own example file uses the key `vimeo`; the code actually wants `vimeo_bearer` — the wrong one is silently ignored at load, and the script warns if it ends up in the output
+
+---
+
 ### `video-processor.py`
 
 Interactive video transcoder built around `ffmpeg`/`ffprobe`, with menus for resolution, codec, and quality/size targeting (fixed size cap, constant-quality, or a flat default bitrate). Probes the source first and prints a per-stream breakdown (container, codecs, profiles, resolution, frame rate, pixel format and bit depth, channel layouts, sample rates, bitrates, languages, dispositions); stops ffmpeg and cleans up partial output on `Ctrl+C`, `SIGTERM`, or a failed encode; and shows live progress during encoding.
