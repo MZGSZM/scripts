@@ -6,6 +6,32 @@ Scripts in this folder are intended to run unmodified on Linux, Windows, and mac
 
 ## Scripts
 
+### `adb-auto.py`
+
+Finds the port of an Android device's Wireless Debugging service via mDNS and runs `adb connect` against it automatically, so you don't have to read the randomly assigned port off the Developer options screen each time. Browses for `_adb-tls-connect._tcp.local.` broadcasts for up to 5 seconds, then connects. If the advertised address belongs to the machine running the script (e.g. Termux on the phone itself), it connects via `localhost`; otherwise it connects to the advertised LAN address.
+
+- **Requirements:** Python 3, the `zeroconf` package (`pip install zeroconf`; if it's missing the script prints that hint and exits `1`), and `adb` on `PATH`
+- **Platform notes:** Pure Python plus `adb`, so it runs the same on Linux, Windows, macOS, and Termux. Whether an address is "this machine" is decided by trying to bind a UDP socket to it, which only succeeds for addresses assigned to a local interface (no packets are sent). IPv4 addresses are preferred when the device advertises both.
+- **Usage:**
+  ```bash
+  pip install zeroconf
+  python adb-auto.py
+  ```
+- **Exit status:**
+  - `0` connected (or already connected)
+  - `1` `zeroconf` is not installed
+  - `2` nothing found within the scan timeout
+  - `3` `adb` not found on `PATH`
+  - `4` `adb connect` failed or timed out
+  - `130` interrupted
+- **Notable behavior:**
+  - Takes no arguments or options
+  - Wireless Debugging must be enabled and the device connected to Wi-Fi; it also assumes the machine running the script has already been paired with the device, since it only runs `adb connect`
+  - Acts on the first service it sees and doesn't distinguish between multiple advertised devices
+  - `adb connect` often exits `0` even when the connection fails, so success is judged from its output ("connected to" / "already connected to") as well as its exit code
+
+---
+
 ### `cookies2cobalt.py`
 
 Converts a Netscape-format `cookies.txt` export into the `cookies.json` file a self-hosted [cobalt](https://github.com/imputnet/cobalt) API reads, so you don't have to hand-build cookie strings. Built against cobalt API 11.7.1; pulls `instagram`/`twitter`/`youtube` cookies straight from the export, and lets you add the token-only services (`reddit`, `instagram_bearer`, `vimeo_bearer`) by hand, since those are OAuth credentials rather than cookies and your browser never stores them.
