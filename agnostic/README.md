@@ -57,6 +57,26 @@ Converts a Netscape-format `cookies.txt` export into the `cookies.json` file a s
 
 ---
 
+### `folder-report.py`
+
+Describes a folder's layout, sizes, dates, and file types without copying any file contents into the report, so an AI model or another person can understand what's in a folder without being handed the files. Writes a Markdown report to read and a JSON version to paste or upload. Files are classified by reading at most their first 64 KB and last 4 KB (text files are read in full only to count lines), and none of those bytes end up in the report. It then flags oddities such as extensions that don't match content, sensitive-looking filenames, and empty files, groups repeated copies, and recognizes timestamp-named snapshot folders, folding identical siblings into one entry in the tree to keep backup-heavy reports readable.
+
+Lives in its own folder with a full README: [`folder-report/`](./folder-report/)
+
+- **Requirements:** Python 3.8+, standard library only
+- **Usage:**
+  ```bash
+  ./folder-report.py /path/to/folder
+  ```
+  Writes `<folder>_report.md` and `<folder>_report.json` to the current directory.
+- **Key options:** `--format md|json|both`, `--max-depth`, `--ignore`, `--hash` (confirm real duplicates), `--no-collapse`, `--anonymize` (with `--save-map`), and the opt-in content extras `--csv-headers`, `--json-keys`, `--outline`
+- **Notable behavior:**
+  - File contents stay out of the report unless one of the opt-in extras is used, and the report header says which were used
+  - `--anonymize` replaces names with placeholders, but sizes, dates, and file kinds remain visible
+  - Never share the `.map.json` written by `--save-map`; it translates every placeholder back to the real name
+
+---
+
 ### `text-search.py`
 
 Searches the human-readable text inside files for a keyword or regex pattern, including inside binary files (via printable-string extraction, like `strings`, covering both ASCII and UTF-16LE text) and `.torrent` files (via a built-in bencode parser that reads name/comment/announce-URL fields, including BitTorrent v2 file trees, while skipping binary hash fields).
