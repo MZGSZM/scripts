@@ -68,7 +68,7 @@ This is what keeps reports readable. On a backup folder with 12 to 24 snapshots 
 
 | Option | What it does |
 |---|---|
-| `-o PREFIX` | Output filename prefix. Default is `<folder>_report`. |
+| `-o SUFFIX` | Output filename suffix. Default is `<folder>_report`. |
 | `--format md\|json\|both` | Which files to write. Default is both. |
 | `--max-depth N` | Don't go deeper than N levels. |
 | `--ignore NAME` | Skip a name or glob, like `'*.tmp'`. Repeat it for more. |
