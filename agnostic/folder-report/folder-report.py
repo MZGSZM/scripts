@@ -1231,18 +1231,18 @@ def main():
                         "files appear in this report except the opted-in extras listed.",
     }
 
-    prefix = args.output or ("folder_report" if args.anonymize else f"{root.name}_report")
+    suffix = args.output or ("folder_report" if args.anonymize else f"{root.name}_report")
     written = []
     if args.format in ("md", "both"):
-        Path(prefix + ".md").write_text(to_markdown(meta, summary, tree, args), encoding="utf-8")
-        written.append(prefix + ".md")
+        Path(suffix + ".md").write_text(to_markdown(meta, summary, tree, args), encoding="utf-8")
+        written.append(suffix + ".md")
     if args.format in ("json", "both"):
         doc = strip_private({"meta": meta, "summary": summary, "tree": tree})
-        Path(prefix + ".json").write_text(
+        Path(suffix + ".json").write_text(
             json.dumps(doc, indent=None if args.compact else 1, ensure_ascii=False), encoding="utf-8")
-        written.append(prefix + ".json")
+        written.append(suffix + ".json")
     if args.anonymize and args.save_map:
-        mp = prefix + ".map.json"
+        mp = suffix + ".map.json"
         Path(mp).write_text(json.dumps({v: k[1] for k, v in sc.namer.map.items()}, indent=2), encoding="utf-8")
         written.append(mp + "  <-- KEEP LOCAL, do not share")
 
