@@ -3,8 +3,8 @@
 folder-report.py - Describe a folder's structure and metadata WITHOUT sharing its contents.
 
 Produces:
-  <prefix>.md    human-readable summary (tree, stats, flags)
-  <prefix>.json  machine-readable version (paste/upload to an AI model)
+  <suffix>.md    human-readable summary (tree, stats, flags)
+  <suffix>.json  machine-readable version (paste/upload to an AI model)
 
 Privacy by default: the report holds names, sizes, dates, extensions, counts and
 derived classifications (file kind, encoding, entropy, image dimensions). To
@@ -1169,7 +1169,7 @@ def to_markdown(meta, s, tree, args):
 def main():
     p = argparse.ArgumentParser(description="Summarize a folder's structure and metadata without sharing contents.")
     p.add_argument("path", nargs="?", default=".", help="Folder to analyze (default: current)")
-    p.add_argument("-o", "--output", help="Output prefix (default: <folder>_report)")
+    p.add_argument("-o", "--output", help="Output suffix (default: <folder>_report)")
     p.add_argument("--format", choices=["md", "json", "both"], default="both")
     p.add_argument("--max-depth", type=int, help="Don't descend below this depth")
     p.add_argument("--ignore", action="append", help="Extra name or glob to ignore, e.g. '*.tmp' (repeatable)")
