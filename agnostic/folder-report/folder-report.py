@@ -754,6 +754,24 @@ def find_duplicates(files, do_hash, quiet):
     return likely, verified
 
 
+def opt_in_details(files):
+    """Every file with opted-in extras. Copies with the same name and identical extras are listed once."""
+    groups = {}
+    for f in files:
+        extra = {k: f[k] for k in ("headers", "json_keys", "outline") if f.get(k)}
+        if not extra:
+            continue
+        key = (f["name"], json.dumps(extra, sort_keys=True))
+        if key in groups:
+            groups[key]["copies"] += 1
+            groups[key]["path"] = f["path"]
+        else:
+            groups[key] = dict(path=f["path"], copies=1, **extra)
+            if "json_keys_count" in f:
+                groups[key]["json_keys_count"] = f["json_keys_count"]
+    return sorted(groups.values(), key=lambda g: g["path"].lower())
+
+
 def backup_runs(series):
     """Cluster every snapshot timestamp in the tree into runs (gaps over an hour start a new run)."""
     times = sorted(t for s in series for t in s["_times"])
@@ -852,11 +870,37 @@ def build_summary(sc, tree, args):
         "extension_mismatches_count": len(sc.mismatches),
         "project_markers": dict(sc.markers),
         "possibly_sensitive_filenames": sc.sensitive,
+        "opt_in_details": opt_in_details(files),
         "skipped": dict(sc.skipped),
     }
 
 
 # ---------------------------------------------------------------- markdown
+EXTRA_LIST_LIMIT = 40
+EXTRA_NAME_LIMIT = 60
+
+
+def short_list(items):
+    """Join opted-in names for display, trimming very long ones and very long lists."""
+    shown = [x if len(x) <= EXTRA_NAME_LIMIT else x[:EXTRA_NAME_LIMIT - 3] + "..." for x in map(str, items)]
+    more = len(shown) - EXTRA_LIST_LIMIT
+    return ", ".join(shown[:EXTRA_LIST_LIMIT]) + (f" (+{more} more)" if more > 0 else "")
+
+
+def extra_lines(n):
+    """Opted-in details for one file: CSV headers, JSON keys, Python outline."""
+    out = []
+    if n.get("headers"):
+        out.append(f"columns: {short_list(n['headers'])}")
+    if n.get("json_keys"):
+        more = n.get("json_keys_count", 0) - len(n["json_keys"])
+        out.append(f"keys: {short_list(n['json_keys'])}" + (f" (+{more} more)" if more > 0 else ""))
+    out += n.get("outline", [])[:25]
+    if len(n.get("outline", [])) > 25:
+        out.append(f"... +{len(n['outline']) - 25} more definitions")
+    return out
+
+
 def file_line(n):
     bits = [human_size(n["size"])]
     if "rows" in n:
@@ -936,7 +980,7 @@ def render_tree(node, prefix, file_limit, dir_limit, out):
             out.append(f"{prefix}{branch}{c['name']}  (unreadable)")
         else:
             out.append(f"{prefix}{branch}{file_line(c)}")
-            for o in c.get("outline", [])[:25]:
+            for o in extra_lines(c):
                 out.append(f"{prefix}{cont}    · {o}")
     for j, x in enumerate(extras):
         out.append(f"{prefix}{'└── ' if j == len(extras) - 1 else '├── '}{x}")
@@ -1085,6 +1129,23 @@ def to_markdown(meta, s, tree, args):
     if flags:
         L.append("## Flags")
         L += [f"- {x}" if not x.startswith("  ") else x for x in flags]
+        L.append("")
+
+    if meta["opt_ins"]:
+        L.append("## Opted-in extras")
+        L.append(f"Included because you asked for: {', '.join(meta['opt_ins'])}. "
+                 "These are the only parts of this report taken from inside files.")
+        L.append("")
+        details = s["opt_in_details"]
+        if not details:
+            L.append("_No matching files found._")
+        for d in details[:200]:
+            copies = f"  (x{d['copies']} identical copies, showing the last)" if d["copies"] > 1 else ""
+            L.append(f"- `{d['path']}`{copies}")
+            for x in extra_lines(d):
+                L.append(f"  - {x}")
+        if len(details) > 200:
+            L.append(f"- _{len(details) - 200} more files, see the JSON_")
         L.append("")
 
     if s["skipped"]:
