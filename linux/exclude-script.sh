@@ -15,6 +15,11 @@
 # fw4 (OpenWrt 22.03 and newer):
 #   nftables rules placed at the start of the fw4 dstnat chain, ahead of the
 #   per-zone jumps where port forwards and DNS redirects live.
+# GL.iNet DNS override (any firmware with an "inet dns_table" nftables table):
+#   GL redirects DNS in its own table, and an accept in fw4 cannot stop another
+#   table's chain. So the bypass also goes at the top of dns_table's PREROUTING
+#   chain, from a hook script that runs on every firewall reload and once a
+#   minute from cron, since GL rebuilds that table on its own schedule.
 #
 # Excluded devices are kept in /etc/dns-bypass.list as "MAC IP", one per line.
 
@@ -24,6 +29,8 @@ LIST=/etc/dns-bypass.list
 FW3_INCLUDE=/etc/dns-bypass.fw3
 NFT_DIR=/usr/share/nftables.d/chain-pre/dstnat
 NFT_FILE=$NFT_DIR/50-dns-bypass.nft
+GL_HOOK=/etc/dns-bypass-gl.sh
+CRONTAB=/etc/crontabs/root
 
 die() { echo "Error: $*" >&2; exit 1; }
 
@@ -138,6 +145,58 @@ setup_fw4() {
     nft list chain inet fw4 dstnat 2>/dev/null | grep -q "$MAC"
 }
 
+# True when GL.iNet's DNS override table is present
+has_gl_dns_table() {
+    command -v nft >/dev/null 2>&1 &&
+        nft list chain inet dns_table PREROUTING >/dev/null 2>&1
+}
+
+setup_gl() {
+    cat > "$GL_HOOK" <<'EOF'
+#!/bin/sh
+# Managed by excludescript.sh. Runs on every firewall reload and once a minute
+# from cron. GL.iNet's DNS override redirects port 53 in its own table
+# (inet dns_table), so this puts an accept for each listed MAC at the top of
+# that table's PREROUTING chain. It only adds rules that are missing, so
+# running it repeatedly is harmless. No "exit" in here because the firewall
+# may source include scripts.
+if [ -s /etc/dns-bypass.list ] && command -v nft >/dev/null 2>&1 &&
+    nft list chain inet dns_table PREROUTING >/dev/null 2>&1; then
+    _dnsb_cur=$(nft list chain inet dns_table PREROUTING 2>/dev/null)
+    grep -Ev '^[[:space:]]*(#|$)' /etc/dns-bypass.list | while read -r _dnsb_mac _; do
+        if ! printf '%s\n' "$_dnsb_cur" | grep -F "ether saddr $_dnsb_mac " | grep -qF 'dns-bypass'; then
+            nft insert rule inet dns_table PREROUTING ether saddr "$_dnsb_mac" \
+                meta l4proto '{ tcp, udp }' th dport 53 counter accept comment '"dns-bypass"'
+        fi
+    done
+fi
+EOF
+    chmod 755 "$GL_HOOK"
+
+    # Re-run on every firewall reload
+    if [ "$(uci -q get firewall.dns_bypass_gl)" != "include" ]; then
+        uci -q delete firewall.dns_bypass_gl
+        uci set firewall.dns_bypass_gl=include
+        uci set firewall.dns_bypass_gl.type='script'
+        uci set firewall.dns_bypass_gl.path="$GL_HOOK"
+        uci set firewall.dns_bypass_gl.reload='1'
+        uci set firewall.dns_bypass_gl.fw4_compatible='1'
+        uci commit firewall
+    fi
+
+    # And once a minute, since GL rebuilds dns_table without a firewall reload
+    touch "$CRONTAB"
+    if ! grep -qF "$GL_HOOK" "$CRONTAB"; then
+        printf '* * * * * %s >/dev/null 2>&1\n' "$GL_HOOK" >> "$CRONTAB"
+        /etc/init.d/cron enable >/dev/null 2>&1
+        /etc/init.d/cron restart >/dev/null 2>&1 </dev/null
+    fi
+
+    sh "$GL_HOOK"
+
+    nft list chain inet dns_table PREROUTING 2>/dev/null | grep -F "ether saddr $MAC " | grep -qF 'dns-bypass'
+}
+
 main() {
     [ "$(id -u)" -eq 0 ] || die "run this as root"
 
@@ -181,6 +240,13 @@ main() {
     else
         keep_on_upgrade "$FW3_INCLUDE"
         setup_fw3 || die "bypass rule not found in nat PREROUTING after restart, check 'logread -e firewall'"
+    fi
+
+    if has_gl_dns_table; then
+        echo "GL.iNet DNS override found, adding the bypass to its dns_table too."
+        keep_on_upgrade "$GL_HOOK"
+        keep_on_upgrade "$CRONTAB"
+        setup_gl || die "bypass rule not found in inet dns_table PREROUTING, check 'nft list chain inet dns_table PREROUTING'"
     fi
 
     echo "IP $IP excluded from port 53 re-write."
